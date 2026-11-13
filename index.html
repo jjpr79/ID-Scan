@@ -160,7 +160,7 @@
         <rect x="12.5" y="15" width="4" height="2.4" rx=".7" fill="#e8a30c"/>
       </svg>
       <div>
-        <h1>ID·Scan</h1>
+        <h1>ID·Scan <span style="font-size:10px; background:var(--blue-t); color:var(--blue); padding:1px 6px; border-radius:99px; font-weight:600; vertical-align:middle;">v1.0</span></h1>
         <p>Prototipo · OpenCV.js + Tesseract.js · 100% local</p>
       </div>
     </div>
@@ -216,7 +216,18 @@
       <label class="field"><span>Número de documento</span>
         <input id="fDoc" class="in mono" type="text" autocomplete="off" placeholder="No detectado — edita manualmente">
       </label>
-      <div class="row">
+      <div id="extraFields" hidden style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+        <label class="field" style="margin-bottom:0"><span>Tipo doc</span>
+          <input id="fType" class="in" type="text" autocomplete="off" placeholder="CC">
+        </label>
+        <label class="field" style="margin-bottom:0"><span>Fecha nacimiento</span>
+          <input id="fDob" class="in" type="text" autocomplete="off" placeholder="DD/MM/YYYY">
+        </label>
+        <label class="field" style="margin-bottom:0"><span>Edad</span>
+          <input id="fAge" class="in" type="text" autocomplete="off" placeholder="Edad">
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
         <button id="btnSave" class="btn primary" type="submit">Guardar</button>
         <span id="extractHint" class="hint"></span>
       </div>
@@ -255,6 +266,7 @@
     btnStart:$('btnStart'), btnShot:$('btnShot'), btnRetry:$('btnRetry'), btnCancel:$('btnCancel'),
     fileWrap:$('fileWrap'), fileInput:$('fileInput'), optPre:$('optPre'), btnView:$('btnView'), btnRotate:$('btnRotate'),
     resultCard:$('resultCard'), resultForm:$('resultForm'), fName:$('fName'), fDoc:$('fDoc'),
+    fType:$('fType'), fDob:$('fDob'), fAge:$('fAge'), extraFields:$('extraFields'),
     conf:$('conf'), extractHint:$('extractHint'), btnSave:$('btnSave'), rawText:$('rawText'),
     list:$('list'), count:$('count'), empty:$('empty'), autosave:$('autosave'), btnCsv:$('btnCsv'),
     toast:$('toast'), toastMsg:$('toastMsg'), toastAct:$('toastAct'),
@@ -549,8 +561,12 @@
       els.fName.value = fields.nombre;
       els.fDoc.value = fields.documento;
       els.rawText.textContent = raw || '(sin texto)';
-      $('debugInfoPre').textContent = 'DEBUG INFO:\n' + JSON.stringify(fields.debugInfo, null, 2);
-      els.conf.textContent = 'confianza ' + conf + '%';
+      
+      let typeLabel = '✓ Cédula colombiana';
+      if (fields.tipoDocumento === 'cedula_venezuela') typeLabel = '✓ Cédula venezolana';
+      else if (fields.tipoDocumento === 'documento_generico') typeLabel = '✓ Documento genérico';
+
+      els.conf.textContent = typeLabel + ' · confianza ' + conf + '%';
       els.conf.dataset.level = conf >= 75 ? 'ok' : conf >= 50 ? 'warn' : 'bad';
       
       const lowConf = conf < 50;
@@ -573,7 +589,7 @@
     }
   }
 
-  /* ---------- heurísticas de extracción (cédula CO y genéricas) ---------- */
+  /* ---------- heurísticas y parsers de documentos ---------- */
   const stripAcc = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
   const BAD = /REPUBLICA|COLOMBIA|CEDULA|CIUDADANIA|IDENTIDAD|IDENTIFICACION|DOCUMENTO|TARJETA|REGISTRAD|NACIONALIDAD|FECHA|NACIMIENTO|EXPEDICION|LUGAR|SEXO|ESTATURA|SANGRE|FIRMA|HUELLA|VIGENCIA|VALIDA|DIGITAL|EMISOR|NOMBRE|APELLIDO|NUMERO|NUIP|DNI/;
   function nameLike(s){
@@ -646,8 +662,25 @@
       .trim();
   }
 
-  function parseFields(raw){
-    const lines = (raw||'').split(/\r?\n/).map(l => l.replace(/\s+/g,' ').trim()).filter(Boolean);
+  function documentoMatch(str, doc) {
+    if (!doc) return false;
+    return str.includes(doc) || doc.includes(str.replace(/\D/g,''));
+  }
+
+  /* 1. detectDocumentType */
+  function detectDocumentType(rawText) {
+    const text = (rawText || '').toUpperCase();
+    if (/\b(V|E)-?\d{6,8}\b|\bREPUBLICA BOLIVARIANA DE VENEZUELA\b|\bCEDULA DE IDENTIDAD\b/i.test(rawText) || /[VE]\s*-?\s*\d{6,8}/i.test(rawText)) {
+      return 'cedula_venezuela';
+    }
+    if (/\bCOLOMBIA\b|\bCIUDADANIA\b|\bNUIP\b|\bC\.?\s?C\.?\b/i.test(text)) {
+      return 'cedula_colombia';
+    }
+    return 'cedula_colombia';
+  }
+
+  /* 2. parseCedulaColombiana (exactamente como estaba) */
+  function parseCedulaColombiana(lines, raw){
     const doc = parseDoc(lines);
     
     let apellidoDetectado = '';
@@ -687,19 +720,121 @@
       nombreFinal = formatName(apellidoDetectado);
     }
 
-    const debugInfo = {
-      ocrLines: lines,
-      apellidoDetectado,
-      nombreDetectado,
-      nombreFinal
-    };
-
-    return { nombre: nombreFinal, documento: doc, debugInfo };
+    return { nombre: nombreFinal, documento: doc, tipoDocumento: 'cedula_colombia' };
   }
 
-  function documentoMatch(str, doc) {
-    if (!doc) return false;
-    return str.includes(doc) || doc.includes(str.replace(/\D/g,''));
+  /* 3. parseCedulaVenezolana */
+  function parseCedulaVenezolana(lines, raw){
+    let documento = '';
+    let apellidos = '';
+    let nombres = '';
+
+    const docRe = /\b([VE])[\s\-]?(\d{6,8})\b/i;
+    for (const line of lines) {
+      const m = line.match(docRe);
+      if (m) {
+        documento = m[1].toUpperCase() + '-' + m[2];
+        break;
+      }
+    }
+    if (!documento) {
+      const mRaw = raw.match(/\b([VE])[\s\-]?(\d{6,8})\b/i);
+      if (mRaw) {
+        documento = mRaw[1].toUpperCase() + '-' + mRaw[2];
+      }
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const upper = lines[i].toUpperCase();
+      if (/APELLIDO/.test(upper) && !apellidos) {
+        if (i - 1 >= 0 && looksLikePersonName(lines[i - 1]) && !documentoMatch(lines[i - 1], documento)) {
+          apellidos = cleanPersonName(lines[i - 1]);
+        } else if (i + 1 < lines.length && looksLikePersonName(lines[i + 1]) && !documentoMatch(lines[i + 1], documento)) {
+          apellidos = cleanPersonName(lines[i + 1]);
+        }
+      }
+      if (/NOMBRE/.test(upper) && !nombres) {
+        if (i - 1 >= 0 && looksLikePersonName(lines[i - 1]) && !documentoMatch(lines[i - 1], documento) && lines[i - 1].toUpperCase() !== apellidos.toUpperCase()) {
+          nombres = cleanPersonName(lines[i - 1]);
+        } else if (i + 1 < lines.length && looksLikePersonName(lines[i + 1]) && !documentoMatch(lines[i + 1], documento) && lines[i + 1].toUpperCase() !== apellidos.toUpperCase()) {
+          nombres = cleanPersonName(lines[i + 1]);
+        }
+      }
+    }
+
+    if (!apellidos || !nombres) {
+      const nameCandidates = [];
+      for (const l of lines) {
+        if (looksLikePersonName(l) && !documentoMatch(l, documento)) {
+          const upper = l.toUpperCase();
+          if (/REPUBLICA|VENEZUELA|BOLIVARIANA|CEDULA|IDENTIDAD|NACIONALIDAD|FECHA|NACIMIENTO/i.test(upper)) continue;
+          if (/^[VE][-\s]?\d+$/.test(l.replace(/\s/g,''))) continue;
+          const cleaned = cleanPersonName(l);
+          if (cleaned && !nameCandidates.includes(cleaned)) {
+            nameCandidates.push(cleaned);
+          }
+        }
+      }
+      if (!apellidos && nameCandidates.length > 0) {
+        apellidos = nameCandidates[0];
+      }
+      if (!nombres && nameCandidates.length > 1) {
+        nombres = nameCandidates.find(c => c !== apellidos) || nameCandidates[1];
+      }
+    }
+
+    const formatName = s => (s||'').toLowerCase().replace(/(^|\s)\S/g, l => l.toUpperCase());
+    let fullName = '';
+    if (nombres && apellidos) {
+      fullName = formatName(nombres) + ' ' + formatName(apellidos);
+    } else if (nombres) {
+      fullName = formatName(nombres);
+    } else if (apellidos) {
+      fullName = formatName(apellidos);
+    }
+
+    return {
+      nombre: fullName,
+      documento: documento,
+      tipoDocumento: 'cedula_venezuela'
+    };
+  }
+
+  /* 4. parseGeneric */
+  function parseGeneric(lines, raw){
+    const doc = parseDoc(lines);
+    const nameCandidates = [];
+    for (const l of lines) {
+      if (looksLikePersonName(l) && !documentoMatch(l, doc)) {
+        const cleaned = cleanPersonName(l);
+        if (cleaned && !nameCandidates.includes(cleaned)) {
+          nameCandidates.push(cleaned);
+        }
+      }
+    }
+    const formatName = s => (s||'').toLowerCase().replace(/(^|\s)\S/g, l => l.toUpperCase());
+    let fullName = nameCandidates.length > 0 ? formatName(nameCandidates[0]) : '';
+    if (nameCandidates.length > 1 && !fullName.includes(nameCandidates[1])) {
+      fullName += ' ' + formatName(nameCandidates[1]);
+    }
+    return {
+      nombre: fullName,
+      documento: doc,
+      tipoDocumento: 'documento_generico'
+    };
+  }
+
+  /* 5. parseFields dispatcher */
+  function parseFields(raw){
+    const lines = (raw||'').split(/\r?\n/).map(l => l.replace(/\s+/g,' ').trim()).filter(Boolean);
+    const docType = detectDocumentType(raw);
+    if(docType === 'cedula_venezuela'){
+      return parseCedulaVenezolana(lines, raw);
+    } else if(docType === 'cedula_colombia'){
+      return parseCedulaColombiana(lines, raw);
+    } else {
+      return parseGeneric(lines, raw);
+    }
   }
 
   /* ---------- registros (localStorage) ---------- */
