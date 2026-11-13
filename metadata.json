@@ -1,0 +1,10 @@
+{
+  "name": "ID·Scan — prototipo OCR",
+  "description": "Prototipo OCR local en navegador con OpenCV.js y Tesseract.js para escaneo de documentos de identidad.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
