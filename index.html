@@ -224,6 +224,7 @@
     <details class="raw">
       <summary>Texto OCR completo (sin procesar)</summary>
       <pre id="rawText"></pre>
+      <pre id="debugInfoPre" style="margin-top:6px; font-size:11px; color:#1d39ab; background:#eef1fc; padding:8px; border-radius:6px; white-space:pre-wrap;"></pre>
     </details>
   </section>
   <section class="card">
@@ -548,6 +549,7 @@
       els.fName.value = fields.nombre;
       els.fDoc.value = fields.documento;
       els.rawText.textContent = raw || '(sin texto)';
+      $('debugInfoPre').textContent = 'DEBUG INFO:\n' + JSON.stringify(fields.debugInfo, null, 2);
       els.conf.textContent = 'confianza ' + conf + '%';
       els.conf.dataset.level = conf >= 75 ? 'ok' : conf >= 50 ? 'warn' : 'bad';
       
@@ -630,92 +632,69 @@
     }
     return best;
   }
+  function looksLikePersonName(str) {
+    if (!str) return false;
+    return /[A-ZÁÉÍÓÚÑ]{2,}/i.test(str);
+  }
+
+  function cleanPersonName(str) {
+    return (str || '')
+      .replace(/[*=_~#@%&+\/\\()\[\]{}<>]/g, ' ')
+      .replace(/\b[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]\b/g, ' ')
+      .replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   function parseFields(raw){
     const lines = (raw||'').split(/\r?\n/).map(l => l.replace(/\s+/g,' ').trim()).filter(Boolean);
     const doc = parseDoc(lines);
     
-    let apellidos = '';
-    let nombres = '';
+    let apellidoDetectado = '';
+    let nombreDetectado = '';
 
     for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      const upper = l.toUpperCase();
-      
-      if (/APELLIDO/.test(upper)) {
-        for (let offset = -2; offset <= 2; offset++) {
-          if (offset === 0) continue;
-          const idx = i + offset;
-          if (idx >= 0 && idx < lines.length) {
-            const cand = lines[idx];
-            if (isNameCandidate(cand, doc) && !documentoMatch(cand, doc)) {
-              apellidos = cleanName(cand);
-              break;
-            }
-          }
+      const upper = lines[i].toUpperCase();
+
+      if (/APELLIDO/.test(upper) && !apellidoDetectado) {
+        if (i - 1 >= 0 && looksLikePersonName(lines[i - 1])) {
+          apellidoDetectado = lines[i - 1];
+        } else if (i + 1 < lines.length && looksLikePersonName(lines[i + 1])) {
+          apellidoDetectado = lines[i + 1];
         }
       }
-      
-      if (/NOMBRE/.test(upper)) {
-        for (let offset = -2; offset <= 2; offset++) {
-          if (offset === 0) continue;
-          const idx = i + offset;
-          if (idx >= 0 && idx < lines.length) {
-            const cand = lines[idx];
-            if (isNameCandidate(cand, doc) && !documentoMatch(cand, doc)) {
-              const cleaned = cleanName(cand);
-              if (cleaned !== apellidos) {
-                nombres = cleaned;
-                break;
-              }
-            }
-          }
+
+      if (/NOMBRE/.test(upper) && !nombreDetectado) {
+        if (i - 1 >= 0 && looksLikePersonName(lines[i - 1]) && lines[i - 1].toUpperCase() !== apellidoDetectado.toUpperCase()) {
+          nombreDetectado = lines[i - 1];
+        } else if (i + 1 < lines.length && looksLikePersonName(lines[i + 1]) && lines[i + 1].toUpperCase() !== apellidoDetectado.toUpperCase()) {
+          nombreDetectado = lines[i + 1];
         }
       }
     }
 
-    const candidates = [];
-    lines.forEach(l => {
-      if (isNameCandidate(l, doc)) {
-        const clean = cleanName(l);
-        if (!candidates.includes(clean) && !documentoMatch(clean, doc)) {
-          candidates.push(clean);
-        }
-      }
-    });
-
-    if (!apellidos && candidates.length > 0) {
-      apellidos = candidates[0];
-    }
-    if (!nombres && candidates.length > 1) {
-      const other = candidates.find(c => c !== apellidos);
-      if (other) nombres = other;
-    }
+    apellidoDetectado = cleanPersonName(apellidoDetectado);
+    nombreDetectado = cleanPersonName(nombreDetectado);
 
     const formatName = s => (s||'').toLowerCase().replace(/(^|\s)\S/g, l => l.toUpperCase());
     
-    let fullName = '';
-    if (nombres && apellidos) {
-      fullName = formatName(nombres) + ' ' + formatName(apellidos);
-    } else if (nombres) {
-      fullName = formatName(nombres);
-    } else if (apellidos) {
-      fullName = formatName(apellidos);
+    let nombreFinal = '';
+    if (nombreDetectado && apellidoDetectado) {
+      nombreFinal = formatName(nombreDetectado) + ' ' + formatName(apellidoDetectado);
+    } else if (nombreDetectado) {
+      nombreFinal = formatName(nombreDetectado);
+    } else if (apellidoDetectado) {
+      nombreFinal = formatName(apellidoDetectado);
     }
 
-    return { nombre: fullName, documento: doc };
-  }
+    const debugInfo = {
+      ocrLines: lines,
+      apellidoDetectado,
+      nombreDetectado,
+      nombreFinal
+    };
 
-  function isNameCandidate(str, doc) {
-    if (!str) return false;
-    const clean = str.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]/g,' ').replace(/\s+/g,' ').trim();
-    if (clean.length < 4) return false;
-    const upper = clean.toUpperCase();
-    if (/^(E|ES|EEES|EE|DE|LA|EL|Y|A|EN|POR|PARA|DEL|LOS|LAS)$/i.test(upper)) return false;
-    const ignoreWords = /REPUBLICA|COLOMBIA|CEDULA|CIUDADANIA|IDENTIFICACION|PERSONAL|APELLIDOS?|NOMBRES?|FIRMA|NUMERO|NUIP|DNI|FECHA|LUGAR|SEXO|REPUBLICA/;
-    if (ignoreWords.test(upper)) return false;
-    if (doc && documentoMatch(clean, doc)) return false;
-    const letters = (clean.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g) || []).length;
-    return letters >= 4;
+    return { nombre: nombreFinal, documento: doc, debugInfo };
   }
 
   function documentoMatch(str, doc) {
