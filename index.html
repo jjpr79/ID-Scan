@@ -246,10 +246,6 @@
     </div>
     <ul id="list"></ul>
     <p id="empty" class="empty">Sin registros aún. Toma una foto para empezar.</p>
-  </section>
-  <footer>
-    Consejo: Puedes tomar la foto con el celular de lado (horizontal) para aprovechar toda la resolución de la cámara. Si la imagen queda con otra orientación, usa el botón «rotar 90°». Los datos se procesan 100% en tu navegador y se guardan solo en este dispositivo (localStorage).
-  </footer>
 </main>
 <div class="toast" id="toast" role="status" hidden>
   <span id="toastMsg"></span>
@@ -560,11 +556,16 @@
       state.lastConf = conf; state.savedId = null; state.dirty = true;
       els.fName.value = fields.nombre;
       els.fDoc.value = fields.documento;
+      if(els.fType) els.fType.value = fields.tipoDocumento || '';
+      if(els.fDob) els.fDob.value = fields.fechaNacimiento || '';
+      if(els.fAge) els.fAge.value = fields.edad || '';
+      if(els.extraFields) els.extraFields.hidden = fields.fuente !== 'etiqueta_cama';
       els.rawText.textContent = raw || '(sin texto)';
       
       let typeLabel = '✓ Cédula colombiana';
-      if (fields.tipoDocumento === 'cedula_venezuela') typeLabel = '✓ Cédula venezolana';
-      else if (fields.tipoDocumento === 'documento_generico') typeLabel = '✓ Documento genérico';
+      if (fields.fuente === 'etiqueta_cama') typeLabel = '✓ Etiqueta de cama hospitalaria';
+      else if (fields.fuente === 'cedula_venezuela' || fields.tipoDocumento === 'V' || fields.tipoDocumento === 'E') typeLabel = '✓ Cédula venezolana';
+      else if (fields.fuente === 'documento_generico') typeLabel = '✓ Documento genérico';
 
       els.conf.textContent = typeLabel + ' · confianza ' + conf + '%';
       els.conf.dataset.level = conf >= 75 ? 'ok' : conf >= 50 ? 'warn' : 'bad';
@@ -670,6 +671,9 @@
   /* 1. detectDocumentType */
   function detectDocumentType(rawText) {
     const text = (rawText || '').toUpperCase();
+    if (/\bPACIENTE\b/i.test(text) && (/\bDOCUMENTO\b/i.test(text) || /\bEDAD\b/i.test(text) || /\bFECHA\s+DE\s+NACIMIENTO\b/i.test(text))) {
+      return 'etiqueta_cama';
+    }
     if (/\b(V|E)-?\d{6,8}\b|\bREPUBLICA BOLIVARIANA DE VENEZUELA\b|\bCEDULA DE IDENTIDAD\b/i.test(rawText) || /[VE]\s*-?\s*\d{6,8}/i.test(rawText)) {
       return 'cedula_venezuela';
     }
@@ -679,7 +683,7 @@
     return 'cedula_colombia';
   }
 
-  /* 2. parseCedulaColombiana (exactamente como estaba) */
+  /* 2. parseCedulaColombiana */
   function parseCedulaColombiana(lines, raw){
     const doc = parseDoc(lines);
     
@@ -720,7 +724,14 @@
       nombreFinal = formatName(apellidoDetectado);
     }
 
-    return { nombre: nombreFinal, documento: doc, tipoDocumento: 'cedula_colombia' };
+    return {
+      nombre: nombreFinal,
+      documento: doc,
+      tipoDocumento: 'CC',
+      fechaNacimiento: '',
+      edad: '',
+      fuente: 'cedula_colombia'
+    };
   }
 
   /* 3. parseCedulaVenezolana */
@@ -796,7 +807,10 @@
     return {
       nombre: fullName,
       documento: documento,
-      tipoDocumento: 'cedula_venezuela'
+      tipoDocumento: 'V',
+      fechaNacimiento: '',
+      edad: '',
+      fuente: 'cedula_venezuela'
     };
   }
 
@@ -820,15 +834,134 @@
     return {
       nombre: fullName,
       documento: doc,
-      tipoDocumento: 'documento_generico'
+      tipoDocumento: '',
+      fechaNacimiento: '',
+      edad: '',
+      fuente: 'documento_generico'
     };
   }
 
-  /* 5. parseFields dispatcher */
+  /* 5. parseBedLabel */
+  function parseBedLabel(lines, raw){
+    let nombre = '';
+    let tipoDocumento = '';
+    let documento = '';
+    let fechaNacimiento = '';
+    let edad = '';
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const upper = line.toUpperCase();
+
+      if (/\bPACIENTE\b/.test(upper)) {
+        let val = line.replace(/^.*?\bPACIENTE\b[\s:.\-–—]*/i, '').trim();
+        if (!val && i + 1 < lines.length) {
+          val = lines[i + 1].replace(/^[\s:.\-–—]+/, '').trim();
+        }
+        if (val) {
+          nombre = cleanPersonName(val);
+        }
+      }
+
+      if (/\bDOCUMENTO\b/.test(upper) || /\b(CC|TI|CE|PASAPORTE)\b/.test(upper)) {
+        const dtMatch = line.match(/\b(CC|TI|CE|PASAPORTE)\b/i);
+        if (dtMatch) {
+          tipoDocumento = dtMatch[1].toUpperCase();
+        }
+        const numMatch = line.match(/\b\d{5,12}\b/);
+        if (numMatch) {
+          documento = numMatch[0];
+        } else {
+          const after = line.replace(/^.*?\bDOCUMENTO\b[\s:.\-–—]*/i, '').trim();
+          const digits = after.replace(/\D/g, '');
+          if (digits.length >= 5) documento = digits;
+        }
+      }
+
+      if (/FECHA\s+DE\s+NACIMIENTO|NACIMIENTO/.test(upper)) {
+        const dateMatch = line.match(/(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})/);
+        if (dateMatch) {
+          const d = dateMatch[1].padStart(2, '0');
+          const m = dateMatch[2].padStart(2, '0');
+          let y = dateMatch[3];
+          if (y.length === 2) y = '19' + y;
+          fechaNacimiento = `${d}/${m}/${y}`;
+        } else if (i + 1 < lines.length) {
+          const nextDateMatch = lines[i + 1].match(/(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})/);
+          if (nextDateMatch) {
+            const d = nextDateMatch[1].padStart(2, '0');
+            const m = nextDateMatch[2].padStart(2, '0');
+            let y = nextDateMatch[3];
+            if (y.length === 2) y = '19' + y;
+            fechaNacimiento = `${d}/${m}/${y}`;
+          }
+        }
+      }
+
+      if (/\bEDAD\b/.test(upper)) {
+        const ageMatch = line.match(/\b\d{1,3}\b/g);
+        if (ageMatch) {
+          const after = line.replace(/^.*?\bEDAD\b[\s:.\-–—]*/i, '').trim();
+          const mNum = after.match(/\d{1,3}/);
+          if (mNum) {
+            edad = mNum[0];
+          } else {
+            edad = ageMatch[ageMatch.length - 1];
+          }
+        } else if (i + 1 < lines.length) {
+          const nextAgeMatch = lines[i + 1].match(/\b\d{1,3}\b/);
+          if (nextAgeMatch) edad = nextAgeMatch[0];
+        }
+      }
+    }
+
+    if (!documento) {
+      const mDoc = raw.match(/\b(CC|TI|CE|PASAPORTE)\b[\s:]*(\d{5,12})/i);
+      if (mDoc) {
+        if (!tipoDocumento) tipoDocumento = mDoc[1].toUpperCase();
+        documento = mDoc[2];
+      } else {
+        const mNum = raw.match(/\b\d{7,10}\b/);
+        if (mNum) documento = mNum[0];
+      }
+    }
+    if (!tipoDocumento) tipoDocumento = 'CC';
+
+    if (!fechaNacimiento) {
+      const mDate = raw.match(/(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})/);
+      if (mDate) {
+        const d = mDate[1].padStart(2, '0');
+        const m = mDate[2].padStart(2, '0');
+        let y = mDate[3];
+        if (y.length === 2) y = '19' + y;
+        fechaNacimiento = `${d}/${m}/${y}`;
+      }
+    }
+
+    if (!edad) {
+      const mEdad = raw.match(/\bEDAD\b[\s:.\-–—]*(\d{1,3})/i);
+      if (mEdad) edad = mEdad[1];
+    }
+
+    const formatName = s => (s||'').toLowerCase().replace(/(^|\s)\S/g, l => l.toUpperCase());
+
+    return {
+      nombre: formatName(nombre),
+      documento: documento,
+      tipoDocumento: tipoDocumento,
+      fechaNacimiento: fechaNacimiento,
+      edad: edad,
+      fuente: 'etiqueta_cama'
+    };
+  }
+
+  /* 6. parseFields dispatcher */
   function parseFields(raw){
     const lines = (raw||'').split(/\r?\n/).map(l => l.replace(/\s+/g,' ').trim()).filter(Boolean);
     const docType = detectDocumentType(raw);
-    if(docType === 'cedula_venezuela'){
+    if(docType === 'etiqueta_cama'){
+      return parseBedLabel(lines, raw);
+    } else if(docType === 'cedula_venezuela'){
       return parseCedulaVenezolana(lines, raw);
     } else if(docType === 'cedula_colombia'){
       return parseCedulaColombiana(lines, raw);
@@ -843,6 +976,8 @@
       const arr = JSON.parse(localStorage.getItem(KEY) || '[]');
       return Array.isArray(arr) ? arr.filter(r => r && r.id).map(r => ({
         id:String(r.id), nombre:String(r.nombre||''), documento:String(r.documento||''),
+        tipoDocumento:String(r.tipoDocumento||''), fechaNacimiento:String(r.fechaNacimiento||''),
+        edad:String(r.edad||''), fuente:String(r.fuente||''),
         ts:+r.ts || Date.now(), conf:r.conf == null ? null : +r.conf
       })) : [];
     }catch(_){ return []; }
@@ -869,7 +1004,7 @@
       x.setAttribute('aria-label','Eliminar registro'); x.textContent = '×';
       const meta = document.createElement('span');
       meta.className = 'meta';
-      meta.textContent = DTF.format(r.ts) + (r.conf != null ? ' · OCR ' + r.conf + '%' : '');
+      meta.textContent = DTF.format(r.ts) + (r.conf != null ? ' · OCR ' + r.conf + '%' : '') + (r.fuente === 'etiqueta_cama' ? ' · Etiqueta Cama (EDAD: ' + (r.edad||'-') + ')' : '');
       n.addEventListener('input', () => { r.nombre = n.value; persistSoon(); });
       d.addEventListener('input', () => { r.documento = d.value; persistSoon(); });
       x.addEventListener('click', () => removeRecord(r.id));
@@ -902,10 +1037,16 @@
     e.preventDefault();
     if(els.btnSave.disabled) return;
     const nombre = els.fName.value.trim(), doc = els.fDoc.value.trim();
+    const tipoDocumento = els.fType ? els.fType.value.trim() : '';
+    const fechaNacimiento = els.fDob ? els.fDob.value.trim() : '';
+    const edad = els.fAge ? els.fAge.value.trim() : '';
+    const fuente = els.extraFields && !els.extraFields.hidden ? 'etiqueta_cama' : '';
+
     if(state.savedId){
       const r = state.records.find(x => x.id === state.savedId);
       if(r){
-        r.nombre = nombre; r.documento = doc;
+        r.nombre = nombre; r.documento = doc; r.tipoDocumento = tipoDocumento;
+        r.fechaNacimiento = fechaNacimiento; r.edad = edad; r.fuente = fuente;
         renderList(); persist();
         state.dirty = false; updateSaveBtn();
         toast('Registro actualizado ✓');
@@ -913,20 +1054,29 @@
       }
       state.savedId = null;
     }
-    const rec = { id:uid(), nombre, documento:doc, ts:Date.now(), conf:state.lastConf };
+    const rec = { id:uid(), nombre, documento:doc, tipoDocumento, fechaNacimiento, edad, fuente, ts:Date.now(), conf:state.lastConf };
     state.records.unshift(rec);
     state.savedId = rec.id; state.dirty = false;
     renderList(rec.id); persist(); updateSaveBtn();
     toast('Guardado en este dispositivo ✓');
   });
-  [els.fName, els.fDoc].forEach(inp => inp.addEventListener('input', () => { state.dirty = true; updateSaveBtn(); }));
+  [els.fName, els.fDoc, els.fType, els.fDob, els.fAge].forEach(inp => inp && inp.addEventListener('input', () => { state.dirty = true; updateSaveBtn(); }));
 
   /* ---------- exportar CSV ---------- */
   els.btnCsv.addEventListener('click', () => {
     if(!state.records.length) return;
     const q = v => '"' + String(v ?? '').replace(/"/g,'""') + '"';
-    const rows = ['nombre,documento,fecha,confianza_ocr'];
-    state.records.forEach(r => rows.push([q(r.nombre), q(r.documento), q(new Date(r.ts).toISOString()), q(r.conf ?? '')].join(',')));
+    const rows = ['nombre,documento,tipo_documento,fecha_nacimiento,edad,fuente,fecha,confianza_ocr'];
+    state.records.forEach(r => rows.push([
+      q(r.nombre), 
+      q(r.documento), 
+      q(r.tipoDocumento), 
+      q(r.fechaNacimiento), 
+      q(r.edad), 
+      q(r.fuente), 
+      q(new Date(r.ts).toISOString()), 
+      q(r.conf ?? '')
+    ].join(',')));
     const blob = new Blob(['\uFEFF' + rows.join('\r\n')], { type:'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
